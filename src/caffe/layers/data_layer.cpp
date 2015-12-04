@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include <vector>
+#include <boost/thread.hpp>
 
 #include "caffe/data_layers.hpp"
 #include "caffe/proto/caffe.pb.h"
@@ -11,13 +12,22 @@
 
 namespace caffe {
 
+template<typename Dtype>
+class DataLayer<Dtype>::sync {
+  public:
+   mutable boost::mutex master_to_worker_mutex_;
+   mutable boost::mutex counter_mutex_;
+};
+
 template <typename Dtype>
 DataLayer<Dtype>::DataLayer(const LayerParameter& param)
   : BasePrefetchingDataLayer<Dtype>(param),
-    reader_(param) {
-	num_threads_ = 1;
+    reader_(param), sync_(new sync()) {
+	num_threads_ = param.num_threads();
+    worker_data_full_ = false;
 	for (int k = 0; k < num_threads_; k++) {
 	  workers_.push_back(new DataLayerWorker(this, param));
+	  workers_[k]->StartInternalThread();
 	}
 }
 
@@ -91,6 +101,7 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
   done_count_ = 0;
   worker_data_full_ = false;
   for (int item_id = 0; item_id < batch_size; ++item_id) {
+  	printf("Master on item_id %d\n", item_id);
     //timer.Start();
     // get a datum
     Datum& datum = *(reader_.full().pop("Waiting for data"));
@@ -104,14 +115,18 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
     }
 
 	// pass datum and prt to worker
+	printf("Master waiting for worker to take Datum\n");
 	while(worker_data_full_); 
-	master_to_worker_mutex_.lock();
+	printf("Master done waiting for worker to take Datum\n");
+	sync_->master_to_worker_mutex_.lock();
+	printf("Master obtained lock\n");
 
 	master_to_worker_datum_ = &datum;
 	master_to_worker_ptr_ = ptr;
 	worker_data_full_ = true;
 
-	master_to_worker_mutex_.unlock();
+	sync_->master_to_worker_mutex_.unlock();
+	printf("Master released lock\n");
 
 	// worker does this
     //this->data_transformer_->Transform(datum, &(this->transformed_data_));
@@ -123,6 +138,7 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
 
   }
 
+  printf("Master done with batch\n");
   while (done_count_ < batch_size);
   //timer.Stop();
   batch_timer.Stop();
@@ -138,30 +154,34 @@ DataLayer<Dtype>::DataLayerWorker::DataLayerWorker(DataLayer<Dtype>* parent, con
       new DataTransformer<Dtype>(transform_param_, parent_->phase_));
 }
 
+
 template<typename Dtype>
 void DataLayer<Dtype>::DataLayerWorker::InternalThreadEntry() {
   Dtype* ptr;
   bool got_data; 
   Datum* datum = NULL;
+  printf("Worker started\n");
   while (1) {
 
     got_data = false;
-    parent_->master_to_worker_mutex_.lock();
+    parent_->sync_->master_to_worker_mutex_.lock();
 	if (parent_->worker_data_full_) {
+	  printf("Worker got work!\n");
 	  datum = parent_->master_to_worker_datum_;
 	  ptr = parent_->master_to_worker_ptr_;
 	  parent_->worker_data_full_ = false;
 	  got_data = true;
 	}
-	parent_->master_to_worker_mutex_.unlock();
+	parent_->sync_->master_to_worker_mutex_.unlock();
 
 	if (got_data) {
 	  this->data_transformer_->Transform(*datum, ptr);
       parent_->reader_.free().push(const_cast<Datum*>(datum));
 
-      parent_->counter_mutex_.lock();
+      parent_->sync_->counter_mutex_.lock();
 	  parent_->done_count_++;
-	  parent_->counter_mutex_.unlock();
+	  printf("Worker done %d\n", parent_->done_count_);
+	  parent_->sync_->counter_mutex_.unlock();
 
 	} else {
 	 //boost::this_thread::sleep(boost::posix_time::milliseconds(1)); 
