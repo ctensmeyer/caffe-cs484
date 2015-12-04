@@ -15,11 +15,18 @@ template <typename Dtype>
 DataLayer<Dtype>::DataLayer(const LayerParameter& param)
   : BasePrefetchingDataLayer<Dtype>(param),
     reader_(param) {
+	num_threads_ = 1;
+	for (int k = 0; k < num_threads_; k++) {
+	  workers_.push_back(new DataLayerWorker(this, param));
+	}
 }
 
 template <typename Dtype>
 DataLayer<Dtype>::~DataLayer() {
   this->StopInternalThread();
+	for (int k = 0; k < num_threads_; k++) {
+	  workers_[k]->StopInternalThread();
+	}
 }
 
 template <typename Dtype>
@@ -79,29 +86,87 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
   if (this->output_labels_) {
     top_label = batch->label_.mutable_cpu_data();
   }
+
+  // set up parallel
+  done_count_ = 0;
+  worker_data_full_ = false;
   for (int item_id = 0; item_id < batch_size; ++item_id) {
-    timer.Start();
+    //timer.Start();
     // get a datum
     Datum& datum = *(reader_.full().pop("Waiting for data"));
-    read_time += timer.MicroSeconds();
-    timer.Start();
+    //read_time += timer.MicroSeconds();
+    //timer.Start();
     // Apply data transformations (mirror, scale, crop...)
     int offset = batch->data_.offset(item_id);
-    this->transformed_data_.set_cpu_data(top_data + offset);
-    this->data_transformer_->Transform(datum, &(this->transformed_data_));
-    // Copy label.
+	Dtype* ptr = top_data + offset;
     if (this->output_labels_) {
       top_label[item_id] = datum.label();
     }
-    trans_time += timer.MicroSeconds();
 
-    reader_.free().push(const_cast<Datum*>(&datum));
+	// pass datum and prt to worker
+	while(worker_data_full_); 
+	master_to_worker_mutex_.lock();
+
+	master_to_worker_datum_ = &datum;
+	master_to_worker_ptr_ = ptr;
+	worker_data_full_ = true;
+
+	master_to_worker_mutex_.unlock();
+
+	// worker does this
+    //this->data_transformer_->Transform(datum, &(this->transformed_data_));
+    //reader_.free().push(const_cast<Datum*>(&datum));
+
+    //this->transformed_data_.set_cpu_data(top_data + offset);
+    // Copy label.
+    //trans_time += timer.MicroSeconds();
+
   }
-  timer.Stop();
+
+  while (done_count_ < batch_size);
+  //timer.Stop();
   batch_timer.Stop();
-  DLOG(INFO) << "Prefetch batch: " << batch_timer.MilliSeconds() << " ms.";
-  DLOG(INFO) << "     Read time: " << read_time / 1000 << " ms.";
-  DLOG(INFO) << "Transform time: " << trans_time / 1000 << " ms.";
+  LOG(INFO) << "Prefetch batch: " << batch_timer.MicroSeconds() / 1000 << " ms.";
+  LOG(INFO) << "     Read time: " << read_time / 1000 << " ms.";
+  LOG(INFO) << "Transform time: " << trans_time / 1000 << " ms.";
+}
+
+template<typename Dtype>
+DataLayer<Dtype>::DataLayerWorker::DataLayerWorker(DataLayer<Dtype>* parent, const LayerParameter& param): 
+		transform_param_(param.transform_param()), parent_(parent) {
+  data_transformer_.reset(
+      new DataTransformer<Dtype>(transform_param_, parent_->phase_));
+}
+
+template<typename Dtype>
+void DataLayer<Dtype>::DataLayerWorker::InternalThreadEntry() {
+  Dtype* ptr;
+  bool got_data; 
+  Datum* datum = NULL;
+  while (1) {
+
+    got_data = false;
+    parent_->master_to_worker_mutex_.lock();
+	if (parent_->worker_data_full_) {
+	  datum = parent_->master_to_worker_datum_;
+	  ptr = parent_->master_to_worker_ptr_;
+	  parent_->worker_data_full_ = false;
+	  got_data = true;
+	}
+	parent_->master_to_worker_mutex_.unlock();
+
+	if (got_data) {
+	  this->data_transformer_->Transform(*datum, ptr);
+      parent_->reader_.free().push(const_cast<Datum*>(datum));
+
+      parent_->counter_mutex_.lock();
+	  parent_->done_count_++;
+	  parent_->counter_mutex_.unlock();
+
+	} else {
+	 //boost::this_thread::sleep(boost::posix_time::milliseconds(1)); 
+	}
+  }
 }
 
 INSTANTIATE_CLASS(DataLayer);

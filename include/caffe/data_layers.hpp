@@ -4,6 +4,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <boost/thread.hpp>
 #include "hdf5.h"
 
 #include "caffe/blob.hpp"
@@ -109,6 +110,32 @@ class DataLayer : public BasePrefetchingDataLayer<Dtype> {
   virtual void load_batch(Batch<Dtype>* batch);
 
   DataReader reader_;
+
+  int num_threads_;
+  //boost::thread_group tg_;
+  boost::mutex master_to_worker_mutex_;
+  boost::mutex counter_mutex_;
+  int done_count_;
+
+  Datum* master_to_worker_datum_;
+  Dtype* master_to_worker_ptr_;
+  bool worker_data_full_;
+
+  class DataLayerWorker : public InternalThread {
+   public:
+    explicit DataLayerWorker(DataLayer<Dtype>* parent, const LayerParameter& param);
+    virtual ~DataLayerWorker();
+
+   protected:
+    void InternalThreadEntry();
+    TransformationParameter transform_param_;
+    shared_ptr<DataTransformer<Dtype> > data_transformer_;
+	DataLayer<Dtype>* parent_;
+
+    //DISABLE_COPY_AND_ASSIGN(DataLayerWorker);
+  };
+
+  vector<DataLayerWorker*> workers_;
 };
 
 /**
