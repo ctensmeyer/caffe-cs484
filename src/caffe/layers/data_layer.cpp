@@ -25,6 +25,7 @@ DataLayer<Dtype>::DataLayer(const LayerParameter& param)
     reader_(param), sync_(new sync()) {
 	num_threads_ = param.num_threads();
     worker_data_full_ = false;
+        LOG(INFO) << "Starting " << num_threads_ << " worker threads";
 	for (int k = 0; k < num_threads_; k++) {
 	  workers_.push_back(new DataLayerWorker(this, param));
 	  workers_[k]->StartInternalThread();
@@ -101,7 +102,7 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
   done_count_ = 0;
   worker_data_full_ = false;
   for (int item_id = 0; item_id < batch_size; ++item_id) {
-  	printf("Master on item_id %d\n", item_id);
+    //printf("Master on item_id %d\n", item_id);
     //timer.Start();
     // get a datum
     Datum& datum = *(reader_.full().pop("Waiting for data"));
@@ -114,21 +115,21 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
       top_label[item_id] = datum.label();
     }
 
-	// pass datum and prt to worker
-	printf("Master waiting for worker to take Datum\n");
-	while(worker_data_full_); 
-	printf("Master done waiting for worker to take Datum\n");
-	sync_->master_to_worker_mutex_.lock();
-	printf("Master obtained lock\n");
+    // pass datum and prt to worker
+    //printf("Master waiting for worker to take Datum\n");
+    while(worker_data_full_) 
+      boost::this_thread::yield();
+    //printf("Master done waiting for worker to take Datum\n");
+    sync_->master_to_worker_mutex_.lock();
+    //printf("Master obtained lock\n");
 
-	master_to_worker_datum_ = &datum;
-	master_to_worker_ptr_ = ptr;
-	worker_data_full_ = true;
+    master_to_worker_datum_ = &datum;
+    master_to_worker_ptr_ = ptr;
+    worker_data_full_ = true;
+    sync_->master_to_worker_mutex_.unlock();
+    //printf("Master released lock\n");
 
-	sync_->master_to_worker_mutex_.unlock();
-	printf("Master released lock\n");
-
-	// worker does this
+    // worker does this
     //this->data_transformer_->Transform(datum, &(this->transformed_data_));
     //reader_.free().push(const_cast<Datum*>(&datum));
 
@@ -139,7 +140,10 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
   }
 
   printf("Master done with batch\n");
-  while (done_count_ < batch_size);
+  while (done_count_ < batch_size){ 
+      boost::this_thread::yield(); // Wait for all workers to finish 
+  }
+  printf("Master has detected all workers are done\n");
   //timer.Stop();
   batch_timer.Stop();
   LOG(INFO) << "Prefetch batch: " << batch_timer.MicroSeconds() / 1000 << " ms.";
@@ -162,30 +166,27 @@ void DataLayer<Dtype>::DataLayerWorker::InternalThreadEntry() {
   Datum* datum = NULL;
   printf("Worker started\n");
   while (1) {
-
     got_data = false;
     parent_->sync_->master_to_worker_mutex_.lock();
-	if (parent_->worker_data_full_) {
-	  printf("Worker got work!\n");
-	  datum = parent_->master_to_worker_datum_;
-	  ptr = parent_->master_to_worker_ptr_;
-	  parent_->worker_data_full_ = false;
-	  got_data = true;
-	}
-	parent_->sync_->master_to_worker_mutex_.unlock();
+    if (parent_->worker_data_full_) {
+      //printf("-----Worker got work!(%d)\n", parent_->done_count_);
+      datum = parent_->master_to_worker_datum_;
+      ptr = parent_->master_to_worker_ptr_;
+      parent_->worker_data_full_ = false;
+      got_data = true;
+    }	
+    parent_->sync_->master_to_worker_mutex_.unlock();
 
-	if (got_data) {
-	  this->data_transformer_->Transform(*datum, ptr);
+    if (got_data) {
+      this->data_transformer_->Transform(*datum, ptr);
       parent_->reader_.free().push(const_cast<Datum*>(datum));
-
       parent_->sync_->counter_mutex_.lock();
-	  parent_->done_count_++;
-	  printf("Worker done %d\n", parent_->done_count_);
-	  parent_->sync_->counter_mutex_.unlock();
-
-	} else {
-	 //boost::this_thread::sleep(boost::posix_time::milliseconds(1)); 
-	}
+      parent_->done_count_++;
+      //printf("-----Worker done, parent->DoneCount:%d\n", parent_->done_count_);
+      parent_->sync_->counter_mutex_.unlock();
+    } else {
+      boost::this_thread::yield();
+    }
   }
 }
 
