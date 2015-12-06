@@ -165,7 +165,7 @@ void DataLayer<Dtype>::DataLayerWorker::InternalThreadEntry() {
   bool got_data; 
   Datum* datum = NULL;
   printf("Worker started\n");
-  while (1) {
+  while (!must_stop()) {
     got_data = false;
     parent_->sync_->master_to_worker_mutex_.lock();
     if (parent_->worker_data_full_) {
