@@ -131,6 +131,7 @@ class DataLayer : public BasePrefetchingDataLayer<Dtype> {
     TransformationParameter transform_param_;
     shared_ptr<DataTransformer<Dtype> > data_transformer_;
 	DataLayer<Dtype>* parent_;
+	bool first_;
 
     //DISABLE_COPY_AND_ASSIGN(DataLayerWorker);
   };

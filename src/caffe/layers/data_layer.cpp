@@ -106,6 +106,8 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
     //timer.Start();
     // get a datum
     Datum& datum = *(reader_.full().pop("Waiting for data"));
+	//printf("Datum channels: %d\n", datum.channels());
+	//printf("\tMaster pre-Batch: (%d, %d)\n", item_id, datum.data()[0]);
     //read_time += timer.MicroSeconds();
     //timer.Start();
     // Apply data transformations (mirror, scale, crop...)
@@ -143,6 +145,15 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
   while (done_count_ < batch_size){ 
       boost::this_thread::yield(); // Wait for all workers to finish 
   }
+  /*
+  for (int item_id = 0; item_id < batch_size; ++item_id) {
+    int offset = batch->data_.offset(item_id);
+	Dtype* ptr = top_data + offset;
+
+	printf("\tMaster Batch: (%d, %.3f)\n", item_id, *ptr);
+
+  }
+  */
   printf("Master has detected all workers are done\n");
   //timer.Stop();
   batch_timer.Stop();
@@ -156,6 +167,8 @@ DataLayer<Dtype>::DataLayerWorker::DataLayerWorker(DataLayer<Dtype>* parent, con
 		transform_param_(param.transform_param()), parent_(parent) {
   data_transformer_.reset(
       new DataTransformer<Dtype>(transform_param_, parent_->phase_));
+  data_transformer_->InitRand();
+  first_ = true;
 }
 
 
@@ -178,6 +191,10 @@ void DataLayer<Dtype>::DataLayerWorker::InternalThreadEntry() {
     parent_->sync_->master_to_worker_mutex_.unlock();
 
     if (got_data) {
+	  if (first_) {
+        this->data_transformer_->InferBlobShape(*datum);
+		first_ = false;
+	  }
       this->data_transformer_->Transform(*datum, ptr);
       parent_->reader_.free().push(const_cast<Datum*>(datum));
       parent_->sync_->counter_mutex_.lock();
