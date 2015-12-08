@@ -106,7 +106,7 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
     //timer.Start();
     // get a datum
     Datum& datum = *(reader_.full().pop("Waiting for data"));
-	//printf("Datum channels: %d\n", datum.channels());
+	//printf("Datum channels: %d %d %d\n", datum.channels(), datum.height(), datum.width());
 	//printf("\tMaster pre-Batch: (%d, %d)\n", item_id, datum.data()[0]);
     //read_time += timer.MicroSeconds();
     //timer.Start();
@@ -192,10 +192,12 @@ void DataLayer<Dtype>::DataLayerWorker::InternalThreadEntry() {
 
     if (got_data) {
 	  if (first_) {
-        this->data_transformer_->InferBlobShape(*datum);
+        vector<int> top_shape = this->data_transformer_->InferBlobShape(*datum);
+        this->transformed_data_.Reshape(top_shape);
 		first_ = false;
 	  }
-      this->data_transformer_->Transform(*datum, ptr);
+      this->transformed_data_.set_cpu_data(ptr);
+      this->data_transformer_->Transform(*datum, &(this->transformed_data_));
       parent_->reader_.free().push(const_cast<Datum*>(datum));
       parent_->sync_->counter_mutex_.lock();
       parent_->done_count_++;
